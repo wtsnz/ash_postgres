@@ -9,6 +9,9 @@ defmodule AshPostgres.SqlImplementation do
   require Ecto.Query
 
   @impl true
+  def aggregate_strategy(_resource), do: :lateral
+
+  @impl true
   def manual_relationship_function, do: :ash_postgres_join
 
   @impl true

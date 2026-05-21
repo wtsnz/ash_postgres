@@ -11,6 +11,12 @@ See [Conventional Commits](https://www.conventionalcommits.org) for commit guide
 
 <!-- changelog -->
 
+## Unreleased
+
+### Improvements:
+
+* declare the lateral aggregate strategy explicitly
+
 ## [v2.11.0](https://github.com/ash-project/ash_postgres/compare/v2.10.0...v2.11.0) (2026-07-22)
 
 
