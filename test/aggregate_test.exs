@@ -26,6 +26,20 @@ defmodule AshSql.AggregateTest do
     assert Ash.count!(AshPostgres.Test.PostView) == 0
   end
 
+  test "offset-only query aggregates count the offset result set" do
+    for title <- ["offset aggregate a", "offset aggregate b", "offset aggregate c"] do
+      Post
+      |> Ash.Changeset.for_create(:create, %{title: title})
+      |> Ash.create!()
+    end
+
+    assert 2 ==
+             Post
+             |> Ash.Query.sort(:title)
+             |> Ash.Query.offset(1)
+             |> Ash.count!()
+  end
+
   test "can sum count aggregates" do
     org =
       Organization
