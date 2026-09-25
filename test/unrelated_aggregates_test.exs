@@ -249,6 +249,19 @@ defmodule AshPostgres.Test.UnrelatedAggregatesTest do
     end
   end
 
+  test "filtering by a named unrelated exists aggregate preserves its parent filter" do
+    matching = Ash.create!(User, %{name: "Matching", email: "matching@example.com"})
+    Ash.create!(User, %{name: "Missing", email: "missing@example.com"})
+    Ash.create!(Profile, %{name: "Matching", age: 25, active: true})
+
+    assert [%{id: id}] =
+             User
+             |> Ash.Query.filter(has_matching_name_profile)
+             |> Ash.read!()
+
+    assert id == matching.id
+  end
+
   describe "data layer capability checking" do
     test "Postgres data layer should support unrelated aggregates" do
       # This will fail until we implement the capability
