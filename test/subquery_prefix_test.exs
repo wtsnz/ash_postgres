@@ -69,6 +69,63 @@ defmodule AshPostgres.SubqueryPrefixTest do
     end
   end
 
+  defmodule ModifiedReport do
+    use Ash.Resource, domain: Domain, data_layer: AshPostgres.DataLayer
+
+    postgres do
+      repo(AshPostgres.TestRepo)
+      table("prefix_reports")
+      schema("prefix_declared")
+      migrate?(false)
+    end
+
+    multitenancy do
+      strategy(:context)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:title, :string, public?: true)
+      attribute(:author_name, :string, public?: true)
+    end
+
+    actions do
+      read :read do
+        primary?(true)
+        multitenancy(:allow_global)
+
+        modify_query(fn _ash_query, query ->
+          {:ok, Ecto.Query.put_query_prefix(query, "prefix_override")}
+        end)
+      end
+    end
+  end
+
+  defmodule TenantLink do
+    use Ash.Resource, domain: Domain, data_layer: AshPostgres.DataLayer
+
+    postgres do
+      repo(AshPostgres.TestRepo)
+      table("prefix_links")
+      schema("prefix_declared")
+      migrate?(false)
+    end
+
+    multitenancy do
+      strategy(:context)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:author_name, :string, public?: true)
+      attribute(:report_id, :uuid, public?: true)
+    end
+
+    actions do
+      defaults([:read, create: :*])
+    end
+  end
+
   defmodule TenantAuthor do
     use Ash.Resource, domain: Domain, data_layer: AshPostgres.DataLayer
 
@@ -93,6 +150,14 @@ defmodule AshPostgres.SubqueryPrefixTest do
         destination_attribute(:author_name)
         public?(true)
       end
+
+      many_to_many :linked_reports, TenantReport do
+        through(TenantLink)
+        source_attribute(:name)
+        source_attribute_on_join_resource(:author_name)
+        destination_attribute_on_join_resource(:report_id)
+        public?(true)
+      end
     end
 
     actions do
@@ -102,6 +167,7 @@ defmodule AshPostgres.SubqueryPrefixTest do
     aggregates do
       count(:report_count, :reports)
       first(:first_report_title, :reports, :title)
+      count(:linked_count, :linked_reports)
     end
   end
 
@@ -165,6 +231,16 @@ defmodule AshPostgres.SubqueryPrefixTest do
       )
     end
 
+    for schema <- ["prefix_declared", "prefix_tenant", "prefix_override", "868"] do
+      TestRepo.query!(
+        ~s|CREATE TABLE "#{schema}".prefix_links (id uuid PRIMARY KEY, author_name text, report_id uuid)|
+      )
+
+      TestRepo.query!(
+        ~s|INSERT INTO "#{schema}".prefix_links SELECT gen_random_uuid(), author_name, id FROM "#{schema}".prefix_reports|
+      )
+    end
+
     Ash.create!(TenantAuthor, %{name: "Alice"}, tenant: "prefix_tenant")
     Ash.create!(TenantAuthor, %{name: "Alice"}, tenant: "868")
     Ash.create!(Author, %{name: "Alice"})
@@ -215,11 +291,72 @@ defmodule AshPostgres.SubqueryPrefixTest do
                |> Ash.read!()
     end
 
+    test "many-to-many aggregates read the tenant schema" do
+      assert [%{linked_count: 2}] =
+               TenantAuthor
+               |> Ash.Query.set_tenant("prefix_tenant")
+               |> Ash.Query.load(:linked_count)
+               |> Ash.read!()
+    end
+
+    test "a limited source query keeps the tenant for many-to-many aggregates" do
+      assert [%{linked_count: 2, report_count: 2}] =
+               TenantAuthor
+               |> Ash.Query.set_tenant("prefix_tenant")
+               |> Ash.Query.limit(1)
+               |> Ash.Query.load([:linked_count, :report_count])
+               |> Ash.read!()
+    end
+
+    test "an integer tenant becomes a schema prefix for many-to-many aggregates" do
+      assert [%{linked_count: 1}] =
+               TenantAuthor
+               |> Ash.Query.set_tenant(868)
+               |> Ash.Query.load(:linked_count)
+               |> Ash.read!()
+    end
+
     test "an integer tenant becomes a schema prefix" do
       assert [%{report_count: 1}] =
                TenantAuthor
                |> Ash.Query.set_tenant(868)
                |> Ash.Query.load(:report_count)
+               |> Ash.read!()
+    end
+  end
+
+  describe "the target query's own prefix" do
+    test "a prefix set by the target's read action is kept" do
+      assert ["Override A", "Override B", "Override C"] =
+               ModifiedReport |> Ash.read!() |> Enum.map(& &1.title) |> Enum.sort()
+
+      assert [%{name: "Alice"}] =
+               Author
+               |> Ash.Query.filter(exists(ModifiedReport, title == "Override A"))
+               |> Ash.read!()
+
+      assert [] =
+               Author
+               |> Ash.Query.filter(exists(ModifiedReport, title == "Declared decoy"))
+               |> Ash.read!()
+    end
+
+    test "a tenant wins over a schema in the target's context, as in a direct read" do
+      target =
+        TenantReport
+        |> Ash.Query.set_tenant("prefix_tenant")
+        |> Ash.Query.set_context(%{data_layer: %{schema: "prefix_override"}})
+        |> Ash.Query.sort(:title)
+
+      assert ["Tenant A", "Tenant B"] = target |> Ash.read!() |> Enum.map(& &1.title)
+
+      assert [%{calculations: %{report: "Tenant A"}}] =
+               Author
+               |> Ash.Query.calculate(
+                 :report,
+                 :string,
+                 expr(first(TenantReport, field: :title, query: ^target))
+               )
                |> Ash.read!()
     end
   end
