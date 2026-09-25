@@ -113,6 +113,10 @@ defmodule AshPostgres.UnrelatedAggregateSchemaTest do
 
     actions do
       defaults([:read, create: :*])
+
+      read :all_tenants do
+        multitenancy(:bypass)
+      end
     end
   end
 
@@ -194,6 +198,21 @@ defmodule AshPostgres.UnrelatedAggregateSchemaTest do
       end
 
       exists :has_attribute_report, AttributeReport do
+        filter(expr(author_name == parent(name)))
+      end
+
+      first :any_tenant_first_report, AttributeReport, :title do
+        read_action(:all_tenants)
+        sort(title: :asc)
+      end
+
+      first :bypassing_first_report, AttributeReport, :title do
+        multitenancy(:bypass)
+        sort(title: :asc)
+      end
+
+      exists :has_any_tenant_report, AttributeReport do
+        read_action(:all_tenants)
         filter(expr(author_name == parent(name)))
       end
 
@@ -607,6 +626,54 @@ defmodule AshPostgres.UnrelatedAggregateSchemaTest do
              |> Ash.Query.set_tenant("a")
              |> Ash.Query.filter(has_attribute_report)
              |> Ash.read!()
+  end
+
+  describe "tenancy bypass" do
+    setup do
+      Ash.create!(AttributeReport, %{title: "Tenant A report", author_name: "Alice"}, tenant: "a")
+
+      Ash.create!(AttributeReport, %{title: "Another tenant's report", author_name: "Bob"},
+        tenant: "b"
+      )
+
+      :ok
+    end
+
+    test "first respects a target read action that bypasses tenancy" do
+      assert [%{any_tenant_first_report: "Another tenant's report"}] =
+               Profile
+               |> Ash.Query.set_tenant("a")
+               |> Ash.Query.filter(name == "Alice")
+               |> Ash.Query.load(:any_tenant_first_report)
+               |> Ash.read!()
+    end
+
+    test "first respects an aggregate that bypasses tenancy" do
+      assert [%{bypassing_first_report: "Another tenant's report"}] =
+               Profile
+               |> Ash.Query.set_tenant("a")
+               |> Ash.Query.filter(name == "Alice")
+               |> Ash.Query.load(:bypassing_first_report)
+               |> Ash.read!()
+    end
+
+    test "filtering by exists respects a target read action that bypasses tenancy" do
+      assert [%{name: "Alice"}, %{name: "Bob"}] =
+               Profile
+               |> Ash.Query.set_tenant("a")
+               |> Ash.Query.filter(has_any_tenant_report)
+               |> Ash.Query.sort(:name)
+               |> Ash.read!()
+    end
+
+    test "a count that bypasses tenancy reads every tenant" do
+      assert [%{aggregates: %{reports: 2}}] =
+               Profile
+               |> Ash.Query.set_tenant("a")
+               |> Ash.Query.filter(name == "Alice")
+               |> Ash.Query.aggregate(:reports, :count, AttributeReport, multitenancy: :bypass)
+               |> Ash.read!()
+    end
   end
 
   test "nested exists inside first retains the source tenant" do
