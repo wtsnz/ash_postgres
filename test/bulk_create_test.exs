@@ -10,6 +10,19 @@ defmodule AshPostgres.BulkCreateTest do
   import Ash.Expr
 
   describe "bulk creates" do
+    # PostgreSQL allows at most 65,535 bind parameters per statement. Each post
+    # inserts at least three values (its id, title and timestamps), so 25,000 posts
+    # in one batch need more than that and must be split into several statements.
+    test "a batch that needs more bind parameters than PostgreSQL allows is inserted" do
+      inputs = for i <- 1..25_000, do: %{title: "title#{i}"}
+
+      assert %Ash.BulkResult{status: :success, error_count: 0} =
+               Ash.bulk_create(inputs, Post, :create, batch_size: 25_000, return_errors?: true)
+
+      # The connection is still usable, and every row was stored.
+      assert Ash.count!(Post) == 25_000
+    end
+
     test "bulk creates insert each input" do
       Ash.bulk_create!([%{title: "fred"}, %{title: "george"}], Post, :create)
 
