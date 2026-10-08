@@ -12,6 +12,62 @@ defmodule AshSql.AggregateTest do
   require Ash.Sort
   import Ash.Expr
 
+  describe "aggregate filters through a to-many relationship" do
+    # Two comments with 2 likes match `ratings.score > 5`, the first through two
+    # ratings, and a comment with 7 likes does not. Each matching comment must be
+    # aggregated once, however many of its ratings match.
+    setup do
+      post =
+        Post
+        |> Ash.Changeset.for_create(:create, %{title: "title"})
+        |> Ash.create!()
+
+      for {likes, scores} <- [{2, [8, 9]}, {2, [8]}, {7, [1]}] do
+        comment =
+          Comment
+          |> Ash.Changeset.for_create(:create, %{title: "comment", likes: likes})
+          |> Ash.Changeset.manage_relationship(:post, post, type: :append_and_remove)
+          |> Ash.create!()
+
+        for score <- scores do
+          Rating
+          |> Ash.Changeset.for_create(:create, %{score: score, resource_id: comment.id})
+          |> Ash.Changeset.set_context(%{data_layer: %{table: "comment_ratings"}})
+          |> Ash.create!()
+        end
+      end
+
+      %{post: post}
+    end
+
+    defp aggregate(post, kind, opts) do
+      Post
+      |> Ash.Query.filter(id == ^post.id)
+      |> Ash.Query.aggregate(:result, kind, :comments, opts)
+      |> Ash.read_one!()
+      |> Map.get(:aggregates)
+      |> Map.get(:result)
+    end
+
+    test "each matching record is counted once", %{post: post} do
+      filter = [query: [filter: Ash.Expr.expr(ratings.score > 5)]]
+
+      assert aggregate(post, :count, filter) == 2
+      assert aggregate(post, :sum, [field: :likes] ++ filter) == 4
+      assert Enum.sort(aggregate(post, :list, [field: :likes] ++ filter)) == [2, 2]
+    end
+
+    test "conditions on the same relationship hold for the same related record", %{post: post} do
+      # Only the first comment has one rating that is both above 8 and below 10.
+      filter = [query: [filter: Ash.Expr.expr(ratings.score > 8 and ratings.score < 10)]]
+      assert aggregate(post, :sum, [field: :likes] ++ filter) == 2
+
+      # The first two comments through a rating, the third through its likes.
+      filter = [query: [filter: Ash.Expr.expr(ratings.score > 7 or likes == 7)]]
+      assert aggregate(post, :sum, [field: :likes] ++ filter) == 11
+    end
+  end
+
   test "nested sum aggregates" do
     # asserting an error is not raised
     assert Post
