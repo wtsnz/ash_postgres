@@ -2613,19 +2613,21 @@ defmodule AshPostgres.DataLayer do
       result =
         if options[:upsert?] do
           with_savepoint(repo, opts[:on_conflict], fn ->
-            AshPostgres.Upsert.insert_all(repo,
-              resource: resource,
-              table: source_table(source, resource),
-              prefix: opts[:prefix],
-              entries: ecto_changesets,
-              on_conflict: opts[:on_conflict],
-              conflict_target: opts[:conflict_target],
-              returning: opts[:returning],
-              query_opts: Keyword.take(opts, [:timeout, :log, :telemetry_options])
-            )
+            insert_in_chunks(ecto_changesets, fn entries ->
+              AshPostgres.Upsert.insert_all(repo,
+                resource: resource,
+                table: source_table(source, resource),
+                prefix: opts[:prefix],
+                entries: entries,
+                on_conflict: opts[:on_conflict],
+                conflict_target: opts[:conflict_target],
+                returning: opts[:returning],
+                query_opts: Keyword.take(opts, [:timeout, :log, :telemetry_options])
+              )
+            end)
           end)
         else
-          repo.insert_all(source, ecto_changesets, opts)
+          insert_in_chunks(ecto_changesets, &repo.insert_all(source, &1, opts))
         end
 
       identity = options[:identity]
@@ -2785,6 +2787,40 @@ defmodule AshPostgres.DataLayer do
   # The keys `bulk_create/3` uses to pair returned rows back up with their changesets when
   # upserting. Positional correlation isn't an option there: the rows PostgreSQL returns are
   # neither guaranteed to be in input order nor guaranteed to be one per input.
+  # PostgreSQL's wire protocol takes at most 65,535 bind parameters per statement, and
+  # Postgrex drops the connection when a query needs more. A batch of rows can need more
+  # (rows × fields), so it is inserted in chunks that fit, with headroom for the
+  # parameters of the statement's own `ON CONFLICT` clause. A batch that fits is inserted
+  # in one statement, as before; either way it runs inside the batch's transaction.
+  @max_bind_parameters 65_535
+  @bind_parameter_headroom 1_000
+
+  defp insert_in_chunks(entries, insert) do
+    fields_per_row = entries |> Enum.map(&map_size/1) |> Enum.max(fn -> 1 end) |> max(1)
+    rows_per_chunk = max(div(@max_bind_parameters - @bind_parameter_headroom, fields_per_row), 1)
+
+    case Enum.chunk_every(entries, rows_per_chunk) do
+      [] ->
+        insert.(entries)
+
+      [chunk] ->
+        insert.(chunk)
+
+      chunks ->
+        Enum.reduce(chunks, {0, nil}, fn chunk, {count, rows} ->
+          {chunk_count, chunk_rows} = insert.(chunk)
+
+          rows =
+            case {rows, chunk_rows} do
+              {nil, nil} -> nil
+              {rows, chunk_rows} -> List.wrap(rows) ++ List.wrap(chunk_rows)
+            end
+
+          {count + chunk_count, rows}
+        end)
+    end
+  end
+
   defp upsert_correlation_keys(resource, options) do
     Map.get(options[:identity] || %{}, :keys) || Ash.Resource.Info.primary_key(resource)
   end
