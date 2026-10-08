@@ -2090,43 +2090,30 @@ defmodule AshPostgres.DataLayer do
     end
   end
 
-  # When the update has to join its rows against a subquery, the new values are computed in
-  # that subquery, which reads each row from the statement's snapshot. Under READ COMMITTED,
-  # an update that waited for a concurrent writer then writes values computed from the row as
-  # it was before that write, and the write is lost. Locking the rows makes the subquery wait
-  # for the writer and recompute from the row it committed.
+  # When an update or destroy has to join its rows against a subquery, that subquery selects
+  # the rows, and computes an update's new values, from the statement's snapshot. Under READ
+  # COMMITTED, PostgreSQL re-checks the row being written after waiting for a concurrent
+  # writer, but only against the join condition, not the subquery. So without a lock, a row
+  # that a concurrent write moved out of the query's filter is still updated or deleted, and
+  # a new value like `count + 1` is computed from the row as it was before that write.
+  # Locking the rows in the subquery makes it wait for the writer and re-check them.
   #
-  # The lock is only needed when a new value reads the row itself, like `count + 1` or an
-  # atomic validation. A value that doesn't, like `now()` or one read only from related rows,
-  # isn't made stale by another write to the row, and locking the row wouldn't refresh related
-  # rows anyway. The lock is the one PostgreSQL takes for the update: `FOR UPDATE` when a
-  # column in the primary key, an identity or a unique index changes, and `FOR NO KEY UPDATE`
-  # otherwise, which doesn't block inserts that reference the rows. PostgreSQL doesn't allow row locks with `DISTINCT` or set
-  # operations, so those queries are left unlocked.
-  defp lock_rows_for_atomics(query, resource, atomics, updated_attributes) do
+  # The lock is the one PostgreSQL takes for the write: `FOR UPDATE` for a destroy, or when
+  # a column in the primary key, an identity or a unique index changes, and
+  # `FOR NO KEY UPDATE` otherwise, which doesn't block inserts that reference the rows.
+  # PostgreSQL doesn't allow row locks with `DISTINCT` or set operations, so those queries are
+  # left unlocked.
+  defp lock_subquery_rows(query, resource, type, updated_attributes) do
     cond do
       query.lock || query.distinct || query.combinations != [] ->
         query
 
-      not Enum.any?(atomics, fn {_, expr} -> reads_row?(expr) end) ->
-        query
-
-      updates_key?(resource, updated_attributes) ->
+      type == :destroy || updates_key?(resource, updated_attributes) ->
         Ecto.Query.lock(query, [{^0, a}], fragment("FOR UPDATE OF ?", a))
 
       true ->
         Ecto.Query.lock(query, [{^0, a}], fragment("FOR NO KEY UPDATE OF ?", a))
     end
-  end
-
-  # References to the row's own attributes and calculations, including through `exists` and
-  # `parent`. Aggregates and related rows aren't made current by locking the row.
-  defp reads_row?(expr) do
-    expr
-    |> Ash.Filter.list_refs()
-    |> Enum.any?(fn ref ->
-      ref.relationship_path == [] and not match?(%Ash.Query.Aggregate{}, ref.attribute)
-    end)
   end
 
   defp updates_key?(resource, updated_attributes) do
@@ -2258,7 +2245,7 @@ defmodule AshPostgres.DataLayer do
               cond do
                 query.limit || query.offset ->
                   with root_query <-
-                         lock_rows_for_atomics(root_query, resource, atomics, updated_attributes),
+                         lock_subquery_rows(root_query, resource, type, updated_attributes),
                        {:ok, root_query} <-
                          AshSql.Atomics.select_atomics(resource, root_query, atomics) do
                     {:ok, from(row in Ecto.Query.subquery(root_query), []),
@@ -2268,7 +2255,7 @@ defmodule AshPostgres.DataLayer do
                 !Enum.empty?(query.joins) || has_exists? ->
                   with root_query <- Ecto.Query.exclude(root_query, :order_by),
                        root_query <-
-                         lock_rows_for_atomics(root_query, resource, atomics, updated_attributes),
+                         lock_subquery_rows(root_query, resource, type, updated_attributes),
                        {:ok, root_query} <-
                          AshSql.Atomics.select_atomics(resource, root_query, atomics) do
                     {:ok, from(row in Ecto.Query.subquery(root_query), []),

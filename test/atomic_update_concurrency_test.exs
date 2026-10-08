@@ -35,16 +35,33 @@ defmodule AshPostgres.Test.AtomicUpdateConcurrencyTest do
   # Increments the score in a transaction held open until `update` is waiting on it, then
   # commits and returns the score once both writes are done.
   defp score_after_concurrent_increment(post, update) do
+    post_after_concurrent_increment(post, update).score
+  end
+
+  # The same, returning the stored post, or `nil` if it was deleted.
+  defp post_after_concurrent_increment(post, update) do
+    during_concurrent_write(
+      fn ->
+        post
+        |> Ash.Changeset.for_update(:increment_score, %{amount: 1})
+        |> Ash.Changeset.set_context(@context)
+        |> Ash.update!()
+      end,
+      update
+    )
+
+    TestNoSandboxRepo.get(Post, post.id)
+  end
+
+  # Runs `write` in a transaction held open until `update` is waiting on it, then commits,
+  # and returns once both are done.
+  defp during_concurrent_write(write, update) do
     parent = self()
 
     first =
       Task.async(fn ->
         TestNoSandboxRepo.transaction(fn ->
-          post
-          |> Ash.Changeset.for_update(:increment_score, %{amount: 1})
-          |> Ash.Changeset.set_context(@context)
-          |> Ash.update!()
-
+          write.()
           send(parent, :first_written)
 
           receive do
@@ -63,8 +80,6 @@ defmodule AshPostgres.Test.AtomicUpdateConcurrencyTest do
 
     assert {:ok, :ok} = Task.await(first, 5_000)
     Task.await(second, 5_000)
-
-    TestNoSandboxRepo.get!(Post, post.id).score
   end
 
   test "an update through a code interface given an id keeps a concurrent write", %{post: post} do
@@ -158,8 +173,8 @@ defmodule AshPostgres.Test.AtomicUpdateConcurrencyTest do
            end) == 2
   end
 
-  # The `UPDATE` statement run by `fun`.
-  defp update_sql(fun) do
+  # The `UPDATE` (or `DELETE`) statement run by `fun`.
+  defp update_sql(statement \\ "UPDATE", fun) do
     parent = self()
     handler = "atomic-update-sql-#{System.unique_integer()}"
 
@@ -167,7 +182,7 @@ defmodule AshPostgres.Test.AtomicUpdateConcurrencyTest do
       handler,
       [:ash_postgres, :test_no_sandbox_repo, :query],
       fn _, _, %{query: query}, _ ->
-        if String.starts_with?(query, "UPDATE"), do: send(parent, {:update_sql, query})
+        if String.starts_with?(query, statement), do: send(parent, {:update_sql, query})
       end,
       nil
     )
@@ -207,34 +222,87 @@ defmodule AshPostgres.Test.AtomicUpdateConcurrencyTest do
     assert TestNoSandboxRepo.get!(Post, post.id).uniq_one == "!"
   end
 
-  # A value that doesn't read the row can't be made stale by a concurrent write, so there's
-  # nothing to lock for. (A literal is set directly rather than through the subquery, and
-  # Post's `updated_at` reads the row to see whether anything changed, so this uses a
-  # computed value on Author, which has no timestamps.)
-  test "an update whose new values don't read the row doesn't lock" do
-    on_exit(fn -> TestNoSandboxRepo.delete_all(AshPostgres.Test.Author) end)
-
-    author =
-      AshPostgres.Test.Author
-      |> Ash.Changeset.for_create(:create, %{first_name: "old"})
-      |> Ash.Changeset.set_context(@context)
-      |> Ash.create!()
-
-    sql =
-      update_sql(fn ->
-        AshPostgres.Test.Author
-        |> Ash.Query.filter(id == ^author.id)
+  # The subquery also selects the rows. PostgreSQL re-checks a row against the subquery's
+  # filter after waiting only if the subquery locked it, so without a lock a row that a
+  # concurrent write moved out of the filter is still written, even when the new values don't
+  # read the row.
+  test "an update over a limited query skips a row a concurrent write moved out of its filter",
+       %{post: post} do
+    post =
+      post_after_concurrent_increment(post, fn ->
+        Post
+        |> Ash.Query.filter(id == ^post.id and score == 0)
         |> Ash.Query.limit(1)
-        |> Ash.bulk_update!(:set_random_first_name, %{},
+        |> Ash.bulk_update!(:set_title, %{title: "changed"},
           context: @context,
           strategy: :atomic,
           return_errors?: true
         )
       end)
 
-    assert sql =~ "FROM (SELECT"
-    refute sql =~ "FOR UPDATE"
-    refute sql =~ "FOR NO KEY UPDATE"
-    assert TestNoSandboxRepo.get!(AshPostgres.Test.Author, author.id).first_name != "old"
+    assert {post.score, post.title} == {1, "title"}
+  end
+
+  # Author has no timestamps, so this update's only new value is a constant.
+  test "an update setting a constant skips a row a concurrent write moved out of its filter" do
+    on_exit(fn -> TestNoSandboxRepo.delete_all(AshPostgres.Test.Author) end)
+
+    author =
+      AshPostgres.Test.Author
+      |> Ash.Changeset.for_create(:create, %{first_name: "open"})
+      |> Ash.Changeset.set_context(@context)
+      |> Ash.create!()
+
+    during_concurrent_write(
+      fn ->
+        author
+        |> Ash.Changeset.for_update(:update, %{first_name: "paid"})
+        |> Ash.Changeset.set_context(@context)
+        |> Ash.update!()
+      end,
+      fn ->
+        AshPostgres.Test.Author
+        |> Ash.Query.filter(id == ^author.id and first_name == "open")
+        |> Ash.Query.limit(1)
+        |> Ash.bulk_update!(:update, %{last_name: "closed"},
+          context: @context,
+          strategy: :atomic,
+          return_errors?: true
+        )
+      end
+    )
+
+    author = TestNoSandboxRepo.get!(AshPostgres.Test.Author, author.id)
+    assert {author.first_name, author.last_name} == {"paid", nil}
+  end
+
+  test "a destroy over a limited query skips a row a concurrent write moved out of its filter",
+       %{post: post} do
+    post =
+      post_after_concurrent_increment(post, fn ->
+        Post
+        |> Ash.Query.filter(id == ^post.id and score == 0)
+        |> Ash.Query.limit(1)
+        |> Ash.bulk_destroy!(:destroy, %{},
+          context: @context,
+          strategy: :atomic,
+          return_errors?: true
+        )
+      end)
+
+    assert post.score == 1
+  end
+
+  test "a destroy over a limited query locks with FOR UPDATE", %{post: post} do
+    sql =
+      update_sql("DELETE", fn ->
+        Post
+        |> Ash.Query.filter(id == ^post.id)
+        |> Ash.Query.limit(1)
+        |> Ash.bulk_destroy!(:destroy, %{}, context: @context, strategy: :atomic)
+      end)
+
+    assert sql =~ "FOR UPDATE OF"
+    refute sql =~ "NO KEY"
   end
 end
