@@ -2139,11 +2139,12 @@ defmodule AshPostgres.DataLayer do
       |> AshPostgres.DataLayer.Info.custom_indexes()
       |> Enum.filter(& &1.unique)
       |> Enum.flat_map(& &1.fields)
+      |> Enum.map(&AshPostgres.CustomIndex.column_name/1)
 
     (Ash.Resource.Info.primary_key(resource) ++ identity_keys ++ unique_index_fields)
     |> Enum.flat_map(fn field ->
       case Ash.Resource.Info.attribute(resource, field) do
-        nil -> if is_binary(field), do: [field], else: []
+        nil -> [to_string(field)]
         attribute -> [to_string(attribute.source)]
       end
     end)
