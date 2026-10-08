@@ -115,6 +115,7 @@ defmodule AshPostgres.MixProject do
         "documentation/topics/development/upgrading-to-2.0.md",
         "documentation/topics/development/upgrading-to-postgres-18.md",
         "documentation/topics/advanced/expressions.md",
+        "documentation/topics/advanced/locked-reads.md",
         "documentation/topics/advanced/manual-relationships.md",
         "documentation/topics/advanced/partitioned-tables.md",
         "documentation/topics/advanced/schema-based-multitenancy.md",

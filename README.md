@@ -40,6 +40,7 @@ Minimum required PostgreSQL version: `13.0`
 
 ### Advanced
 
+- [Locked Reads and Related Data](documentation/topics/advanced/locked-reads.md)
 - [Expressions](documentation/topics/advanced/expressions.md)
 - [Manual Relationships](documentation/topics/advanced/manual-relationships.md)
 - [Partitioned Tables](documentation/topics/advanced/partitioned-tables.md)
