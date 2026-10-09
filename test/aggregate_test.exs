@@ -983,6 +983,37 @@ defmodule AshSql.AggregateTest do
                |> Ash.read_one!()
     end
 
+    test "an unsorted list excludes nil values unless `include_nil?` is `true`" do
+      post =
+        Post
+        |> Ash.Changeset.for_create(:create, %{title: "title"})
+        |> Ash.create!()
+
+      for {title, likes} <- [{"bbb", 1}, {nil, 1}, {"aaa", 1}, {"aaa", 0}] do
+        Comment
+        |> Ash.Changeset.for_create(:create, %{title: title, likes: likes})
+        |> Ash.Changeset.manage_relationship(:post, post, type: :append_and_remove)
+        |> Ash.create!()
+      end
+
+      # The list has no sort, so its order is unspecified; compare it sorted.
+      load = fn opts ->
+        Post
+        |> Ash.Query.filter(id == ^post.id)
+        |> Ash.Query.aggregate(:titles, :list, :comments, [field: :title] ++ opts)
+        |> Ash.read_one!()
+        |> Map.get(:aggregates)
+        |> Map.get(:titles)
+        |> Enum.sort()
+      end
+
+      assert load.([]) == ["aaa", "aaa", "bbb"]
+      assert load.(uniq?: true) == ["aaa", "bbb"]
+      assert load.(query: [filter: Ash.Expr.expr(likes > 0)]) == ["aaa", "bbb"]
+      # `Enum.sort/1` puts nil before strings.
+      assert load.(include_nil?: true) == [nil, "aaa", "aaa", "bbb"]
+    end
+
     @tag :postgres_16
     test "returns nil values if `include_nil?` is set to `true`" do
       post =
