@@ -53,6 +53,42 @@ defmodule AshPostgres.Test.UpsertTest do
     end
   end
 
+  # Attribute multitenancy with an identity that does not include the tenant
+  # attribute, so two tenants can hold the same `local_key`. The test creates
+  # the table itself.
+  defmodule TenantRecord do
+    @moduledoc false
+    use Ash.Resource,
+      domain: Domain,
+      data_layer: AshPostgres.DataLayer
+
+    postgres do
+      table("tenant_upsert_records")
+      repo(AshPostgres.TestRepo)
+    end
+
+    attributes do
+      uuid_primary_key(:id)
+      attribute(:tenant, :string, public?: true)
+      attribute(:local_key, :string, public?: true)
+      attribute(:value, :integer, public?: true)
+    end
+
+    multitenancy do
+      strategy(:attribute)
+      attribute(:tenant)
+    end
+
+    identities do
+      identity(:local_key, [:local_key])
+    end
+
+    actions do
+      default_accept(:*)
+      defaults([:read, create: :*])
+    end
+  end
+
   # Backed by a view (created by the test) over a table. Views have no `xmax` system column,
   # so `view? true` drops the `:upsert_action` metadata.
   defmodule ViewRecord do
@@ -242,6 +278,74 @@ defmodule AshPostgres.Test.UpsertTest do
     assert skipped.id == original.id
     assert skipped.price == 10
     assert Ash.Resource.get_metadata(skipped, :upsert_skipped)
+  end
+
+  describe "a skipped upsert with attribute multitenancy" do
+    setup do
+      AshPostgres.TestRepo.query!("""
+      CREATE TABLE tenant_upsert_records (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant text,
+        local_key text,
+        value bigint
+      )
+      """)
+
+      AshPostgres.TestRepo.query!("""
+      CREATE UNIQUE INDEX tenant_upsert_records_local_key_index
+      ON tenant_upsert_records (tenant, local_key)
+      """)
+
+      # The same local key in two tenants, the other tenant's inserted last.
+      records =
+        for tenant <- ["a", "b"], into: %{} do
+          record =
+            TenantRecord
+            |> Ash.Changeset.for_create(:create, %{local_key: "k", value: 1}, tenant: tenant)
+            |> Ash.create!()
+
+          {tenant, record}
+        end
+
+      %{records: records}
+    end
+
+    @upsert [
+      upsert?: true,
+      upsert_identity: :local_key,
+      upsert_fields: [:value],
+      upsert_condition: Ash.Expr.expr(false),
+      return_skipped_upsert?: true
+    ]
+
+    test "returns the upsert's own tenant's record from a single create", %{records: records} do
+      skipped =
+        TenantRecord
+        |> Ash.Changeset.for_create(
+          :create,
+          %{local_key: "k", value: 2},
+          [tenant: "a"] ++ @upsert
+        )
+        |> Ash.create!()
+
+      assert skipped.id == records["a"].id
+      assert skipped.tenant == "a"
+      assert Ash.Resource.get_metadata(skipped, :upsert_skipped)
+    end
+
+    test "returns the upsert's own tenant's record from a bulk create", %{records: records} do
+      %{records: [skipped]} =
+        Ash.bulk_create!(
+          [%{local_key: "k", value: 2}],
+          TenantRecord,
+          :create,
+          [tenant: "a", return_records?: true, return_errors?: true] ++ @upsert
+        )
+
+      assert skipped.id == records["a"].id
+      assert skipped.tenant == "a"
+      assert Ash.Resource.get_metadata(skipped, :upsert_skipped)
+    end
   end
 
   test "upserting results in the same created_at timestamp, but a new updated_at timestamp" do

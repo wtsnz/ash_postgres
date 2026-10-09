@@ -2867,6 +2867,7 @@ defmodule AshPostgres.DataLayer do
                     query -> Ash.Query.do_filter(query, identity.where)
                   end)
                   |> Ash.Query.set_tenant(changeset.tenant)
+                  |> filter_by_attribute_tenant()
 
                 with {:ok, ecto_query} <- Ash.Query.data_layer_query(ash_query),
                      {:ok, results} <- run_query(ecto_query, resource) do
@@ -2978,6 +2979,23 @@ defmodule AshPostgres.DataLayer do
   # The keys `bulk_create/3` uses to pair returned rows back up with their changesets when
   # upserting. Positional correlation isn't an option there: the rows PostgreSQL returns are
   # neither guaranteed to be in input order nor guaranteed to be one per input.
+  # `Ash.Query.data_layer_query/1` sets a tenant's schema, but the filter for attribute
+  # multitenancy is added by Ash's read action, which this lookup bypasses. The identity's
+  # keys don't include the tenant attribute either, so without this filter a skipped
+  # upsert could return another tenant's record with the same identity.
+  defp filter_by_attribute_tenant(%{tenant: nil} = query), do: query
+
+  defp filter_by_attribute_tenant(query) do
+    with :attribute <- Ash.Resource.Info.multitenancy_strategy(query.resource),
+         attribute when not is_nil(attribute) <-
+           Ash.Resource.Info.multitenancy_attribute(query.resource) do
+      {m, f, a} = Ash.Resource.Info.multitenancy_parse_attribute(query.resource)
+      Ash.Query.do_filter(query, [{attribute, apply(m, f, [query.to_tenant | a])}])
+    else
+      _ -> query
+    end
+  end
+
   defp upsert_correlation_keys(resource, options) do
     Map.get(options[:identity] || %{}, :keys) || Ash.Resource.Info.primary_key(resource)
   end
