@@ -213,6 +213,34 @@ defmodule AshPostgres.Test.WriteTenantScopingTest do
       assert stored(%Note{id: id}) == {"a", "bulk"}
     end
 
+    test "a bulk upsert with records for two tenants updates each in its own tenant" do
+      a_note = note!("a")
+      b_note = note!("b")
+
+      # Each record's tenant comes from its input. AshPostgres uses one upsert condition per
+      # batch, so the two tenants' records must not share one.
+      assert %{status: :success} =
+               Ash.bulk_create(
+                 [%{id: a_note.id, body: "a's update"}, %{id: b_note.id, body: "b's update"}],
+                 Note,
+                 :save,
+                 tenant: "a",
+                 return_errors?: true,
+                 transform_changeset: fn changeset ->
+                   if Ash.Changeset.get_attribute(changeset, :id) == b_note.id do
+                     changeset
+                     |> Ash.Changeset.set_tenant("b")
+                     |> Ash.Changeset.force_change_attribute(:shop_id, "b")
+                   else
+                     changeset
+                   end
+                 end
+               )
+
+      assert stored(a_note) == {"a", "a's update"}
+      assert stored(b_note) == {"b", "b's update"}
+    end
+
     test "upserts on a tenant-scoped identity and an all_tenants? identity" do
       note = note!("a", %{slug: "s", code: "c"})
 
