@@ -1445,7 +1445,6 @@ defmodule AshPostgres.DataLayer do
               end
             end)
             |> Ash.Query.set_tenant(source_query.tenant)
-            |> filter_by_attribute_tenant(source_query.tenant)
             |> set_lateral_join_prefix(query)
             |> case do
               %{valid?: true} = through_query ->
@@ -1658,12 +1657,6 @@ defmodule AshPostgres.DataLayer do
     end
   end
 
-  # Attribute multitenancy is applied by the read action, which queries passed straight to
-  # `Ash.Query.data_layer_query/1` don't run.
-  defp filter_by_attribute_tenant(query, tenant) do
-    AshSql.Join.handle_attribute_multitenancy(query, tenant, query.action)
-  end
-
   # The data layer queries for the steps of a through path after the source, where `parent/1`
   # refers to the record of the step before: the source record for the first step.
   defp through_step_queries(query, source_query, source_data_layer_query, steps) do
@@ -1677,7 +1670,6 @@ defmodule AshPostgres.DataLayer do
           data_layer: %{start_bindings_at: binding, parent_bindings: parent_bindings}
         })
         |> Ash.Query.set_tenant(source_query.tenant)
-        |> filter_by_attribute_tenant(source_query.tenant)
         |> set_lateral_join_prefix(query)
         |> case do
           %{valid?: true} = step_query ->
@@ -2888,7 +2880,6 @@ defmodule AshPostgres.DataLayer do
                     query -> Ash.Query.do_filter(query, identity.where)
                   end)
                   |> Ash.Query.set_tenant(changeset.tenant)
-                  |> filter_by_attribute_tenant(changeset.tenant)
 
                 with {:ok, ecto_query} <- Ash.Query.data_layer_query(ash_query),
                      {:ok, results} <- run_query(ecto_query, resource) do
@@ -4496,7 +4487,6 @@ defmodule AshPostgres.DataLayer do
               query -> Ash.Query.do_filter(query, identity.where)
             end)
             |> Ash.Query.set_tenant(changeset.tenant)
-            |> filter_by_attribute_tenant(changeset.tenant)
 
           {:ok,
            {:upsert_skipped, ash_query,
