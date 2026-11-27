@@ -8871,4 +8871,79 @@ defmodule AshPostgres.MigrationGeneratorTest do
       end
     end
   end
+
+  describe "value_to_postgres_default for function and MFA defaults" do
+    defmodule CustomDefaultUUID do
+      use Ash.Type
+      use AshPostgres.Type
+
+      @impl Ash.Type
+      def storage_type(_), do: :uuid
+
+      @impl Ash.Type
+      def constraints, do: [prefix: [type: :string]]
+
+      @impl Ash.Type
+      def cast_input(value, _), do: Ash.Type.UUIDv7.cast_input(value, [])
+
+      @impl Ash.Type
+      def cast_stored(value, _), do: Ash.Type.UUIDv7.cast_stored(value, [])
+
+      @impl Ash.Type
+      def dump_to_native(value, _), do: Ash.Type.UUIDv7.dump_to_native(value, [])
+
+      def generate, do: Ash.UUIDv7.generate()
+      def generate(_prefix), do: Ash.UUIDv7.generate()
+
+      @impl AshPostgres.Type
+      def value_to_postgres_default(_type, _constraints, {__MODULE__, :generate, [_prefix]}),
+        do: {:ok, ~S[fragment("uuid_generate_v7()")]}
+
+      def value_to_postgres_default(_type, _constraints, fun) when is_function(fun, 0) do
+        if fun == (&__MODULE__.generate/0),
+          do: {:ok, ~S[fragment("uuid_generate_v7()")]},
+          else: :error
+      end
+
+      def value_to_postgres_default(_type, _constraints, _), do: :error
+    end
+
+    test "consults value_to_postgres_default for 0-arity function and MFA defaults", %{
+      snapshot_path: snapshot_path,
+      migration_path: migration_path
+    } do
+      defposts do
+        attributes do
+          uuid_v7_primary_key(:id,
+            type: CustomDefaultUUID,
+            constraints: [prefix: "post"],
+            default: {CustomDefaultUUID, :generate, ["post"]}
+          )
+
+          attribute(:external_id, CustomDefaultUUID,
+            allow_nil?: false,
+            default: &CustomDefaultUUID.generate/0
+          )
+        end
+      end
+
+      defdomain([Post])
+
+      AshPostgres.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        name: "custom_fn_defaults"
+      )
+
+      [migration] = Path.wildcard("#{migration_path}/**/*_custom_fn_defaults.exs")
+      contents = File.read!(migration)
+
+      assert contents =~ ~S[add :id, :uuid, null: false, default: fragment("uuid_generate_v7()")]
+
+      assert contents =~
+               ~S[add :external_id, :uuid, null: false, default: fragment("uuid_generate_v7()")]
+    end
+  end
 end

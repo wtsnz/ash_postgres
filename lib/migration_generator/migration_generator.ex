@@ -4323,7 +4323,7 @@ defmodule AshPostgres.MigrationGenerator do
 
   @uuid_functions [&Ash.UUID.generate/0, &Ecto.UUID.generate/0]
 
-  defp default(%{name: name, default: default, type: type}, resource, repo)
+  defp default(%{name: name, default: default, type: type} = attr, resource, repo)
        when is_function(default) do
     configured_default(resource, name) ||
       cond do
@@ -4346,12 +4346,20 @@ defmodule AshPostgres.MigrationGenerator do
           ~S[fragment("CURRENT_DATE")]
 
         true ->
-          "nil"
+          case migration_default(type, Map.get(attr, :constraints, []), default) do
+            {:ok, default} -> default
+            :error -> "nil"
+          end
       end
   end
 
-  defp default(%{name: name, default: {_, _, _}}, resource, _),
-    do: configured_default(resource, name) || "nil"
+  defp default(%{name: name, default: {_, _, _} = value, type: type} = attr, resource, _) do
+    configured_default(resource, name) ||
+      case migration_default(type, Map.get(attr, :constraints, []), value) do
+        {:ok, default} -> default
+        :error -> "nil"
+      end
+  end
 
   defp default(%{name: name, default: nil}, resource, _),
     do: configured_default(resource, name) || "nil"
